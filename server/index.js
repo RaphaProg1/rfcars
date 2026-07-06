@@ -11,7 +11,27 @@ const dataDirectory = process.env.RAILWAY_VOLUME_MOUNT_PATH || __dirname;
 const dataFile = path.join(dataDirectory, 'data.json');
 const sessions = new Map();
 const digits = value => String(value || '').replace(/\D/g, '');
-const emptyDb = () => ({ raffles: [], activeRaffleId: null, orders: [], audit: [] });
+const emptyDb = () => ({ raffles: [], activeRaffleId: null, orders: [], winners: [], audit: [] });
+const maskName = name => {
+  const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return 'Cliente RFCars';
+  if (parts.length === 1) return `${parts[0][0] || ''}.`;
+  return `${parts[0]} ${parts.at(-1)[0] || ''}.`;
+};
+const publicOrder = (db, order) => {
+  const raffle = db.raffles.find(r => r.id === order.raffleId);
+  return {
+    id: order.id,
+    code: order.code,
+    raffleTitle: raffle?.title || 'Rifa RFCars Brasil',
+    status: order.status,
+    numbers: order.numbers,
+    amount: order.amount,
+    createdAt: order.createdAt,
+    paidAt: order.paidAt || null,
+    expiresAt: order.expiresAt || null
+  };
+};
 const read = () => {
   try {
     const raw = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
@@ -67,7 +87,7 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   }
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
@@ -76,6 +96,42 @@ app.use(express.json({ limit: '1mb', verify: (req, res, buffer) => { req.rawBody
 
 app.get('/api/health', (req, res) => res.json({ ok: true, service: 'RFCars Brasil API' }));
 app.get('/api/raffle', (req, res) => res.json(publicRaffle(read())));
+app.get('/api/winners', (req, res) => {
+  const db = read();
+  const winners = [...(db.winners || [])]
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+    .map(winner => {
+      const raffle = db.raffles.find(r => r.id === winner.raffleId);
+      return {
+        id: winner.id,
+        raffleTitle: raffle?.title || winner.raffleTitle || 'Rifa RFCars Brasil',
+        number: winner.number,
+        name: maskName(winner.name),
+        city: winner.city || '',
+        state: winner.state || '',
+        createdAt: winner.createdAt,
+        paidAt: winner.paidAt || null
+      };
+    });
+  res.json(winners);
+});
+app.post('/api/my-numbers', (req, res) => {
+  const db = read();
+  const cpf = digits(req.body?.cpf);
+  const contact = String(req.body?.contact || '').trim().toLowerCase();
+  if (cpf.length !== 11 || contact.length < 5) return res.status(400).json({ error: 'Informe CPF e e-mail ou celular usado na compra.' });
+  const contactDigits = digits(contact);
+  const orders = db.orders
+    .filter(order => order.cpf === cpf)
+    .filter(order => {
+      const emailMatches = String(order.email || '').toLowerCase() === contact;
+      const phoneMatches = contactDigits.length >= 10 && digits(order.phone).endsWith(contactDigits.slice(-9));
+      return emailMatches || phoneMatches;
+    })
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+    .map(order => publicOrder(db, order));
+  res.json({ orders });
+});
 
 app.post('/api/admin/login', (req, res) => {
   const configured = process.env.ADMIN_PASSWORD;
@@ -97,6 +153,7 @@ app.get('/api/admin/dashboard', auth, (req, res) => {
     raffle,
     raffles: db.raffles.map(r => raffleWithStats(db, r)),
     activeRaffleId: db.activeRaffleId,
+    winners: db.winners || [],
     stats: {
       revenue: paid.reduce((sum, o) => sum + o.amount, 0),
       sold: db.raffles.reduce((sum, r) => sum + raffleWithStats(db, r).soldCount, 0),
@@ -157,6 +214,21 @@ app.delete('/api/admin/raffles/:id', auth, (req, res) => {
   db.audit.push({ at: new Date().toISOString(), action: 'raffle.deleted', raffleId: raffle.id, title: raffle.title });
   write(db);
   res.sendStatus(204);
+});
+
+app.patch('/api/admin/orders/:id', auth, (req, res) => {
+  const db = read();
+  const order = db.orders.find(o => o.id === req.params.id);
+  if (!order) return res.status(404).json({ error: 'Pedido não encontrado.' });
+  const status = String(req.body?.status || '');
+  if (!['pending', 'paid', 'canceled'].includes(status)) return res.status(400).json({ error: 'Status inválido.' });
+  order.status = status;
+  if (status === 'paid' && !order.paidAt) order.paidAt = new Date().toISOString();
+  if (status !== 'paid') delete order.paidAt;
+  order.updatedAt = new Date().toISOString();
+  db.audit.push({ at: order.updatedAt, action: 'order.status.updated', orderId: order.id, status });
+  write(db);
+  res.json(publicOrder(db, order));
 });
 
 app.post('/api/orders', async (req, res) => {
@@ -228,6 +300,36 @@ app.get('/api/admin/raffles/:raffleId/winner/:number', auth, (req, res) => {
   db.audit.push({ at: new Date().toISOString(), action: 'winner.lookup', raffleId: raffle.id, number, orderId: order?.id || null });
   write(db);
   res.json(order ? { number, name: order.name, email: order.email, phone: order.phone, orderId: order.id, paidAt: order.paidAt } : null);
+});
+
+app.post('/api/admin/raffles/:raffleId/winner', auth, (req, res) => {
+  const number = Number(req.body?.number);
+  if (!Number.isInteger(number) || number < 0 || number > 999) return res.status(400).json({ error: 'Informe um número entre 000 e 999.' });
+  const db = read();
+  const raffle = db.raffles.find(r => r.id === req.params.raffleId);
+  if (!raffle) return res.status(404).json({ error: 'Rifa não encontrada.' });
+  const order = db.orders.find(o => o.raffleId === raffle.id && o.status === 'paid' && o.numbers.includes(number));
+  if (!order) return res.status(404).json({ error: 'Só é possível registrar ganhador com pedido pago nessa rifa.' });
+  const winner = {
+    id: crypto.randomUUID(),
+    raffleId: raffle.id,
+    raffleTitle: raffle.title,
+    orderId: order.id,
+    number,
+    name: order.name,
+    email: order.email,
+    phone: order.phone,
+    city: String(req.body?.city || '').trim(),
+    state: String(req.body?.state || '').trim().toUpperCase().slice(0, 2),
+    paidAt: order.paidAt || null,
+    createdAt: new Date().toISOString()
+  };
+  db.winners = [...(db.winners || []).filter(w => w.raffleId !== raffle.id), winner];
+  db.raffles = db.raffles.map(r => r.id === raffle.id ? { ...r, status: 'completed', updatedAt: winner.createdAt } : r);
+  if (db.activeRaffleId === raffle.id) db.activeRaffleId = null;
+  db.audit.push({ at: winner.createdAt, action: 'winner.registered', raffleId: raffle.id, orderId: order.id, number });
+  write(db);
+  res.json(winner);
 });
 
 const dist = path.join(__dirname, '..', 'dist');
