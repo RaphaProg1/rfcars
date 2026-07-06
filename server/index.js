@@ -55,9 +55,15 @@ const auth = (req, res, next) => {
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  const allowedOrigins = String(process.env.ALLOWED_ORIGIN || '').split(',').map(value => value.trim()).filter(Boolean);
+  const normalizeOrigin = value => String(value || '').trim().replace(/\/+$/, '');
+  const normalizedOrigin = normalizeOrigin(origin);
+  const allowedOrigins = String(process.env.ALLOWED_ORIGIN || '')
+    .split(',')
+    .map(normalizeOrigin)
+    .filter(Boolean);
   const isLocal = origin && /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin);
-  if (origin && (isLocal || allowedOrigins.includes(origin))) {
+  const isRFCarsNetlify = /^https:\/\/([a-z0-9-]+--)?rfcars\.netlify\.app$/i.test(normalizedOrigin);
+  if (origin && (isLocal || isRFCarsNetlify || allowedOrigins.includes(normalizedOrigin))) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
