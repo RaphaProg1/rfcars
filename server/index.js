@@ -73,6 +73,31 @@ const getPixWithRetry = async provider => {
   }
   return { pix: extractPix(current), provider: current };
 };
+const summarizePagarmeOrder = provider => ({
+  orderId: provider?.id,
+  orderCode: provider?.code,
+  orderStatus: provider?.status,
+  chargeCount: provider?.charges?.length || 0,
+  charges: (provider?.charges || []).map(charge => ({
+    id: charge.id,
+    status: charge.status,
+    paymentMethod: charge.payment_method,
+    amount: charge.amount,
+    paidAmount: charge.paid_amount,
+    lastTransaction: charge.last_transaction ? {
+      id: charge.last_transaction.id,
+      status: charge.last_transaction.status,
+      transactionType: charge.last_transaction.transaction_type,
+      gatewayResponse: charge.last_transaction.gateway_response,
+      acquirerMessage: charge.last_transaction.acquirer_message,
+      hasQrCode: Boolean(charge.last_transaction.qr_code),
+      hasQrCodeUrl: Boolean(charge.last_transaction.qr_code_url),
+      keys: Object.keys(charge.last_transaction)
+    } : null,
+    keys: Object.keys(charge)
+  })),
+  keys: Object.keys(provider || {})
+});
 const read = () => {
   try {
     if (!fs.existsSync(dataFile) && dataFile !== bundledDataFile && fs.existsSync(bundledDataFile)) {
@@ -324,15 +349,17 @@ app.post('/api/orders', async (req, res) => {
   provider = pixResult.provider;
   const pix = pixResult.pix;
   if (!pix.qr_code) {
-    console.error('Pagar.me sem QR Code Pix:', JSON.stringify({
-      orderId: provider?.id,
-      status: provider?.status,
-      chargeStatus: provider?.charges?.[0]?.status,
-      transactionStatus: pix.rawStatus,
-      chargeKeys: Object.keys(provider?.charges?.[0] || {}),
-      transactionKeys: Object.keys(provider?.charges?.[0]?.last_transaction || {})
-    }));
-    return res.status(502).json({ error: 'O Pagar.me criou o pedido, mas não retornou o código Pix. Confira se a chave é de produção/teste correta e se Pix está habilitado na conta.' });
+    const summary = summarizePagarmeOrder(provider);
+    console.error('Pagar.me sem QR Code Pix:', JSON.stringify(summary));
+    const charge = summary.charges?.[0];
+    const transaction = charge?.lastTransaction;
+    const detail = [
+      `pedido=${summary.orderStatus || 'sem status'}`,
+      `cobranca=${charge?.status || 'sem cobranca'}`,
+      `transacao=${transaction?.status || 'sem transacao'}`,
+      transaction?.acquirerMessage ? `mensagem=${transaction.acquirerMessage}` : ''
+    ].filter(Boolean).join(' | ');
+    return res.status(502).json({ error: `O Pagar.me criou o pedido, mas não retornou o código Pix. Detalhes: ${detail}. Veja os logs do Railway para o resumo completo.` });
   }
   const order = {
     id: crypto.randomUUID(), code, raffleId: raffle.id, status: 'pending', name, email,
