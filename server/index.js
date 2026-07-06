@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 const app = express();
 const port = process.env.PORT || 3001;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dataFile = path.join(__dirname, 'data.json');
+const dataDirectory = process.env.RAILWAY_VOLUME_MOUNT_PATH || __dirname;
+const dataFile = path.join(dataDirectory, 'data.json');
 const sessions = new Map();
 const digits = value => String(value || '').replace(/\D/g, '');
 const emptyDb = () => ({ raffles: [], activeRaffleId: null, orders: [], audit: [] });
@@ -67,6 +68,7 @@ app.use((req, res, next) => {
 });
 app.use(express.json({ limit: '1mb', verify: (req, res, buffer) => { req.rawBody = buffer; } }));
 
+app.get('/api/health', (req, res) => res.json({ ok: true, service: 'RFCars Brasil API' }));
 app.get('/api/raffle', (req, res) => res.json(publicRaffle(read())));
 
 app.post('/api/admin/login', (req, res) => {
@@ -215,4 +217,4 @@ if (fs.existsSync(dist)) {
   app.use(express.static(dist));
   app.use((req, res, next) => req.method === 'GET' ? res.sendFile(path.join(dist, 'index.html')) : next());
 }
-app.listen(port, () => console.log(`RFCars Brasil em http://localhost:${port}`));
+app.listen(port, '0.0.0.0', () => console.log(`RFCars Brasil API na porta ${port}`));
