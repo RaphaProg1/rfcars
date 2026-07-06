@@ -7,8 +7,9 @@ import { fileURLToPath } from 'node:url';
 const app = express();
 const port = process.env.PORT || 3001;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dataDirectory = process.env.RAILWAY_VOLUME_MOUNT_PATH || __dirname;
+const dataDirectory = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || (fs.existsSync('/data') ? '/data' : __dirname);
 const dataFile = path.join(dataDirectory, 'data.json');
+const bundledDataFile = path.join(__dirname, 'data.json');
 const sessions = new Map();
 const digits = value => String(value || '').replace(/\D/g, '');
 const emptyDb = () => ({ raffles: [], activeRaffleId: null, orders: [], winners: [], audit: [] });
@@ -34,6 +35,10 @@ const publicOrder = (db, order) => {
 };
 const read = () => {
   try {
+    if (!fs.existsSync(dataFile) && dataFile !== bundledDataFile && fs.existsSync(bundledDataFile)) {
+      fs.mkdirSync(dataDirectory, { recursive: true });
+      fs.copyFileSync(bundledDataFile, dataFile);
+    }
     const raw = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
     const db = { ...emptyDb(), ...raw };
     if (raw.raffle && !db.raffles.length) {
@@ -47,6 +52,7 @@ const read = () => {
   catch { return emptyDb(); }
 };
 const write = data => {
+  fs.mkdirSync(dataDirectory, { recursive: true });
   const temp = `${dataFile}.tmp`;
   fs.writeFileSync(temp, JSON.stringify(data, null, 2));
   fs.renameSync(temp, dataFile);
@@ -74,6 +80,11 @@ const auth = (req, res, next) => {
 };
 
 app.use((req, res, next) => {
+  if (req.path.startsWith('/api/')) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+  }
   const origin = req.headers.origin;
   const normalizeOrigin = value => String(value || '').trim().replace(/\/+$/, '');
   const normalizedOrigin = normalizeOrigin(origin);
