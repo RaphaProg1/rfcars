@@ -61,7 +61,7 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   }
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
@@ -139,6 +139,18 @@ app.post('/api/admin/raffles/:id/publish', auth, (req, res) => {
   db.audit.push({ at: new Date().toISOString(), action: 'raffle.published', raffleId: raffle.id });
   write(db);
   res.json(publicRaffle(db));
+});
+app.delete('/api/admin/raffles/:id', auth, (req, res) => {
+  const db = read();
+  const raffle = db.raffles.find(r => r.id === req.params.id);
+  if (!raffle) return res.status(404).json({ error: 'Rifa não encontrada.' });
+  if (db.orders.some(order => order.raffleId === raffle.id))
+    return res.status(409).json({ error: 'Esta rifa possui pedidos e não pode ser excluída. Marque-a como Encerrada para preservar o histórico.' });
+  db.raffles = db.raffles.filter(r => r.id !== raffle.id);
+  if (db.activeRaffleId === raffle.id) db.activeRaffleId = null;
+  db.audit.push({ at: new Date().toISOString(), action: 'raffle.deleted', raffleId: raffle.id, title: raffle.title });
+  write(db);
+  res.sendStatus(204);
 });
 
 app.post('/api/orders', async (req, res) => {
