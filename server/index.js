@@ -51,6 +51,28 @@ const extractPix = provider => {
     rawStatus: transaction.status || charge.status || provider?.status || null
   };
 };
+const pagarmeHeaders = () => ({
+  'Content-Type': 'application/json',
+  Authorization: `Basic ${Buffer.from(`${process.env.PAGARME_SECRET_KEY}:`).toString('base64')}`
+});
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+const fetchPagarmeOrder = async orderId => {
+  const response = await fetch(`https://api.pagar.me/core/v5/orders/${orderId}`, { headers: pagarmeHeaders() });
+  const body = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(providerErrorMessage(body));
+  return body;
+};
+const getPixWithRetry = async provider => {
+  let current = provider;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const pix = extractPix(current);
+    if (pix.qr_code) return { pix, provider: current };
+    if (!provider?.id || attempt === 3) return { pix, provider: current };
+    await wait(900);
+    current = await fetchPagarmeOrder(provider.id);
+  }
+  return { pix: extractPix(current), provider: current };
+};
 const read = () => {
   try {
     if (!fs.existsSync(dataFile) && dataFile !== bundledDataFile && fs.existsSync(bundledDataFile)) {
@@ -279,12 +301,12 @@ app.post('/api/orders', async (req, res) => {
   try {
     response = await fetch('https://api.pagar.me/core/v5/orders', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Basic ${Buffer.from(`${process.env.PAGARME_SECRET_KEY}:`).toString('base64')}` },
+      headers: pagarmeHeaders(),
       body: JSON.stringify({
         code,
         items: [{ amount: raffle.priceCents, description: `Rifa ${raffle.title}`, quantity: unique.length }],
         customer: { name, email, type: 'individual', document: digits(cpf), phones: { mobile_phone: { country_code: '55', area_code: areaCode, number } } },
-        payments: [{ payment_method: 'pix', pix: { expires_in: 1800, additional_information: [{ name: 'Números', value: unique.map(n => String(n).padStart(3, '0')).join(', ') }] } }],
+        payments: [{ payment_method: 'pix', amount, pix: { expires_in: 1800, additional_information: [{ name: 'Números', value: unique.map(n => String(n).padStart(3, '0')).join(', ') }] } }],
         metadata: { raffle_id: raffle.id }
       })
     });
@@ -293,7 +315,14 @@ app.post('/api/orders', async (req, res) => {
     return res.status(502).json({ error: 'Não foi possível conectar ao Pagar.me.' });
   }
   if (!response.ok) return res.status(502).json({ error: providerErrorMessage(provider) });
-  const pix = extractPix(provider);
+  let pixResult;
+  try {
+    pixResult = await getPixWithRetry(provider);
+  } catch (e) {
+    return res.status(502).json({ error: `O pedido foi criado, mas não foi possível consultar o Pix no Pagar.me: ${e.message}` });
+  }
+  provider = pixResult.provider;
+  const pix = pixResult.pix;
   if (!pix.qr_code) {
     console.error('Pagar.me sem QR Code Pix:', JSON.stringify({
       orderId: provider?.id,
