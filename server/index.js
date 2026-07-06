@@ -33,6 +33,24 @@ const publicOrder = (db, order) => {
     expiresAt: order.expiresAt || null
   };
 };
+const providerErrorMessage = provider => {
+  if (provider?.message) return provider.message;
+  if (Array.isArray(provider?.errors)) return provider.errors.map(error => error.message || error).join(' ');
+  if (provider?.errors && typeof provider.errors === 'object') return Object.values(provider.errors).flat().join(' ');
+  return 'O Pagar.me recusou a criação do pedido.';
+};
+const extractPix = provider => {
+  const charge = provider?.charges?.[0] || {};
+  const transaction = charge.last_transaction || charge.lastTransaction || charge.transactions?.[0] || provider?.last_transaction || provider?.lastTransaction || {};
+  const qrCode = transaction.qr_code || transaction.qrCode || transaction.pix_qr_code || provider?.qr_code || provider?.pix?.qr_code;
+  const qrCodeUrl = transaction.qr_code_url || transaction.qrCodeUrl || transaction.pix_qr_code_url || provider?.qr_code_url || provider?.pix?.qr_code_url;
+  return {
+    chargeId: charge.id || transaction.charge_id || null,
+    qr_code: qrCode,
+    qr_code_url: qrCodeUrl || (qrCode ? `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(qrCode)}` : null),
+    rawStatus: transaction.status || charge.status || provider?.status || null
+  };
+};
 const read = () => {
   try {
     if (!fs.existsSync(dataFile) && dataFile !== bundledDataFile && fs.existsSync(bundledDataFile)) {
@@ -274,18 +292,28 @@ app.post('/api/orders', async (req, res) => {
   } catch {
     return res.status(502).json({ error: 'Não foi possível conectar ao Pagar.me.' });
   }
-  if (!response.ok) return res.status(502).json({ error: provider.message || 'O Pagar.me recusou a criação do pedido.' });
-  const charge = provider.charges?.[0]?.last_transaction;
-  if (!charge?.qr_code) return res.status(502).json({ error: 'O Pagar.me não retornou o QR Code Pix.' });
+  if (!response.ok) return res.status(502).json({ error: providerErrorMessage(provider) });
+  const pix = extractPix(provider);
+  if (!pix.qr_code) {
+    console.error('Pagar.me sem QR Code Pix:', JSON.stringify({
+      orderId: provider?.id,
+      status: provider?.status,
+      chargeStatus: provider?.charges?.[0]?.status,
+      transactionStatus: pix.rawStatus,
+      chargeKeys: Object.keys(provider?.charges?.[0] || {}),
+      transactionKeys: Object.keys(provider?.charges?.[0]?.last_transaction || {})
+    }));
+    return res.status(502).json({ error: 'O Pagar.me criou o pedido, mas não retornou o código Pix. Confira se a chave é de produção/teste correta e se Pix está habilitado na conta.' });
+  }
   const order = {
     id: crypto.randomUUID(), code, raffleId: raffle.id, status: 'pending', name, email,
     cpf: digits(cpf), phone: digits(phone), numbers: unique, amount, providerId: provider.id,
-    chargeId: provider.charges?.[0]?.id || null, createdAt: new Date().toISOString(),
+    chargeId: pix.chargeId, createdAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString()
   };
   db.orders.push(order);
   write(db);
-  res.json({ orderId: order.id, pix: { qr_code: charge.qr_code, qr_code_url: charge.qr_code_url, expires_at: order.expiresAt } });
+  res.json({ orderId: order.id, pix: { qr_code: pix.qr_code, qr_code_url: pix.qr_code_url, expires_at: order.expiresAt } });
 });
 
 app.post('/api/webhooks/pagarme', (req, res) => {
